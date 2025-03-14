@@ -1,0 +1,225 @@
+---
+title: "VDJbet snippet"
+author: "M.S."
+date: "2025-03-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(stringr)
+library(ggplot2)
+set.seed(42)
+```
+
+Generate random sequences
+
+```{bash}
+olga-generate_sequences --humanTRB --seed 42 -n 10000000 | gzip -c > olga/olga10000000.tsv.gz
+```
+
+Load them
+
+```{r}
+data.olga <- read_tsv("olga/olga10000000.tsv.gz",
+                      col_names = c("junction", "junction_aa", "v_call", "j_call")) |>
+  mutate(duplicate_count = 1)
+```
+
+Load vaccination data
+
+```{r}
+strip_gene <- function(gene_call) {
+  str_split_fixed(gene_call, fixed("*"), 2)[,1]
+}
+
+meta.yf <- read_tsv("yf2019/metadata.txt")
+data.yf <- meta.yf |>
+  group_by(donor, day, replica) |>
+  group_modify(~read_tsv(paste0("yf2019/", .$file_name)) |>
+                 select(junction = `N. Seq. CDR3`,
+                        junction_aa = `AA. Seq. CDR3`,
+                        v_call = `All V hits`,
+                        j_call = `All J hits`,
+                        duplicate_count = `Clone count`
+                        ) |>
+                 mutate(v_call = strip_gene(v_call),
+                        j_call = strip_gene(j_call))
+               )
+```
+
+Compute VJ usage factor $\phi = P_{data}(\text V , \text J) /  P_{model}(\text V , \text J)$ so that we can later
+use it to calculate $P_{data}(\text{CDR3aa}, \text V , \text J) = \phi(\text V , \text J) P_{model} (\text{CDR3aa})$
+
+```{r}
+data.vj <- data.yf |>
+  group_by(v_call, j_call) |>
+  summarise(vj_count_yf = n()) |>
+  full_join(data.olga |>
+              group_by(v_call, j_call) |>
+              summarise(vj_count_olga = n())) |>
+  mutate(vj_count_yf = ifelse(is.na(vj_count_yf), 0, vj_count_yf) + 1,
+         vj_count_olga = ifelse(is.na(vj_count_olga), 0, vj_count_olga) + 1,
+         vj_factor = vj_count_yf / sum(vj_count_yf) *
+           sum(vj_count_olga) / vj_count_olga)
+
+data.vj |>
+  arrange(vj_factor) |>
+  head()
+
+data.vj |>
+  arrange(-vj_factor) |>
+  head()
+
+data.vj |>
+  ggplot(aes(x = vj_count_yf, y = vj_count_olga)) +
+  geom_smooth(method = "lm") +
+  geom_point(aes(color = log2(vj_factor))) +
+  scale_color_distiller(palette = "Spectral",
+                        limits = c(-1.5, 1.5)) +
+  scale_x_log10() + scale_y_log10() +
+  theme_bw()
+```
+
+Load VDJdb data and select YFV
+
+```{r}
+data.vdjdb <- read_tsv("vdjdb-2025-02-21/vdjdb_full.txt") |>
+  filter(antigen.epitope == "LLWNGPMAV", !is.na(cdr3.beta)) |>
+  select(v_call = v.beta, j_call = j.beta, junction_aa = cdr3.beta) |>
+  mutate(v_call = strip_gene(v_call),
+         j_call = strip_gene(j_call),
+         junction = strrep('N', 3 * nchar(junction_aa)),
+         duplicate_count = 1) |>
+  unique()
+```
+
+Write seqs we want to compute rearrangement probability for
+
+```{r}
+data.probes <- bind_rows(data.vdjdb,
+                         data.olga |>
+                           head(100000))
+data.probes |>
+  select(junction_aa, v_call, j_call) |>
+  unique() |>
+  write_tsv("olga/probes.tsv", col_names = F)
+```
+
+Run OLGA, approx 10 min per 100000 seqs
+
+```{bash}
+rm olga/probes_pgen.tsv
+olga-compute_pgen -i olga/probes.tsv --humanTRB -o olga/probes_pgen.tsv --display_off --time_updates_off --seq_in 0 --v_in 1 --j_in 2
+```
+
+```{r}
+data.probes |>
+  select(-junction) |>
+  unique() |>
+  left_join(read_tsv("olga/probes_pgen.tsv", 
+                     col_names = c("junction_aa", "pcdr"))) |>
+  left_join(data.vj |>
+              select(v_call, j_call, vj_factor)) |>
+  left_join(data.vdjdb |>
+              select(v_call, j_call, junction_aa) |>
+              mutate(vdjdb = T))|>
+  mutate(vdjdb = ifelse(is.na(vdjdb), F, T)) |>
+  group_by(v_call, j_call, junction_aa) |>
+  mutate(pcdr = max(pcdr)) |> # somewhy different Pgens can be returned?
+  unique() |>
+  mutate(pgen = pcdr * vj_factor + 2^-80,
+         pgen_bin = round(log2(pgen), 0)) -> data.probes.pgen
+
+data.probes.pgen |>
+  arrange(-pgen_bin) |>
+  head(n=100)
+```
+
+Compare distribution of $P$ between VDJdb and random sample
+
+```{r}
+data.probes.pgen |>
+  ggplot(aes(x = pgen_bin)) +
+  geom_density(aes(color = vdjdb, y = ..density..)) +
+  geom_histogram(binwidth = 1, 
+                 aes(fill = vdjdb, y = ..density..),
+                 position = "dodge") +
+  scale_fill_brewer(palette = "Set1") +
+  scale_color_brewer(palette = "Set1") +
+  theme_bw()
+```
+
+Do 100 bootstraps and see how much we match
+
+```{r}
+data.probes.pgen |>
+  filter(vdjdb) |>
+  group_by(pgen_bin) |>
+  summarise(count_vdjdb = n()) ->
+  vdjdb_pgen_counts
+
+sum(vdjdb_pgen_counts$count_vdjdb)
+
+data.probes.pgen.pool <- data.probes.pgen |>
+  left_join(vdjdb_pgen_counts) |>
+  filter(!vdjdb, !is.na(count_vdjdb))
+
+data.yf.match <- data.yf |>
+  inner_join(data.vdjdb |>
+               select(v_call, j_call, junction_aa)) |>
+  group_by(donor, day, replica) |>
+  summarise(matched = n(), 
+            matched_duplicate_count = sum(duplicate_count)) |>
+  mutate(bootstrap = 0)
+for (iter in 1:100){
+  print(paste0("Bootstrap iter#", iter))
+  data.probes.pgen.pool |>
+    group_by(pgen_bin) |>
+    sample_n(count_vdjdb[1]) |>
+    select(v_call, j_call, junction_aa) -> data.probes.pgen.sample
+  data.yf.match <- rbind(data.yf.match,
+                         data.yf |>
+                           inner_join(data.probes.pgen.sample) |>
+                           group_by(donor, day, replica) |>
+                           summarise(matched = n(), 
+                                     matched_duplicate_count = sum(duplicate_count)) |>
+                           mutate(bootstrap = iter)
+  )
+}
+```
+
+Plot
+
+```{r}
+data.yf.match |>
+  filter(bootstrap == 0) |>
+  ggplot(aes(x = day, y = matched)) +
+  geom_boxplot(data = data.yf.match |>
+                 filter(bootstrap > 0),
+               aes(x = day, group = day,
+                   y = matched_duplicate_count)) +
+  geom_line(color = "red") +
+  geom_point(color = "red") +
+  scale_y_log10() +
+  facet_grid(replica~donor) +
+  theme_bw()
+
+data.yf.match |>
+  filter(bootstrap == 0) |>
+  ggplot(aes(x = day, y = matched_duplicate_count)) +
+  geom_boxplot(data = data.yf.match |>
+                 filter(bootstrap > 0),
+               aes(x = day, group = day,
+                   y = matched_duplicate_count)) +
+  geom_line(color = "red") +
+  geom_point(color = "red") +
+  scale_y_log10() +
+  facet_grid(replica~donor) +
+  theme_bw()
+```
+
+```{r}
+# TODO: P-value and effect size
+```
