@@ -1,5 +1,5 @@
 ## VDJ Biomarker Enrichment Test
 
-![splash](assets/splas.jpg)
+![splash](assets/splash.jpg)
 
 Like fonbet, but starts with vdj
