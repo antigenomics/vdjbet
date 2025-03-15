@@ -24,7 +24,7 @@ olga-generate_sequences --humanTRB --seed 42 -n 10000000 | gzip -c > olga/olga10
 Load them
 
 ```{r}
-data.olga <- read_tsv("olga/olga10000000.tsv.gz",
+data.olga <- read_tsv("../assets/olga/olga10000000.tsv.gz",
                       col_names = c("junction", "junction_aa", "v_call", "j_call")) |>
   mutate(duplicate_count = 1)
 ```
@@ -36,7 +36,7 @@ strip_gene <- function(gene_call) {
   str_split_fixed(gene_call, fixed("*"), 2)[,1]
 }
 
-meta.yf <- read_tsv("yf2019/metadata.txt")
+meta.yf <- read_tsv("../assets/yf2019/metadata.txt")
 data.yf <- meta.yf |>
   group_by(donor, day, replica) |>
   group_modify(~read_tsv(paste0("yf2019/", .$file_name)) |>
@@ -87,7 +87,7 @@ data.vj |>
 Load VDJdb data and select YFV
 
 ```{r}
-data.vdjdb <- read_tsv("vdjdb-2025-02-21/vdjdb_full.txt") |>
+data.vdjdb <- read_tsv("../assets/vdjdb-2025-02-21/vdjdb_full.txt") |>
   filter(antigen.epitope == "LLWNGPMAV", !is.na(cdr3.beta)) |>
   select(v_call = v.beta, j_call = j.beta, junction_aa = cdr3.beta) |>
   mutate(v_call = strip_gene(v_call),
@@ -111,7 +111,7 @@ j_allowed <- unique(data.olga$j_call)
 #                           sample_n(100000)) |>
 #  filter(v_call %in% v_allowed, j_call %in% j_allowed)
 
-data.britanova <- read_tsv("britanova/human.trb.strict.txt.gz") |>
+data.britanova <- read_tsv("../assets/britanova/human.trb.strict.txt.gz") |>
   select(junction_aa = cdr3aa,
          v_call = v, j_call = j)
 
@@ -123,7 +123,7 @@ data.probes <- bind_rows(data.vdjdb,
 data.probes |>
   select(junction_aa, v_call, j_call) |>
   unique() |>
-  write_tsv("olga/probes.tsv", col_names = F)
+  write_tsv("../assets/olga/probes.tsv", col_names = F)
 ```
 
 Run OLGA, approx 10 min per 100000 seqs
@@ -139,7 +139,7 @@ Load $P$ from OLGA output
 data.probes |>
   select(-junction, -duplicate_count) |>
   unique() |>
-  left_join(read_tsv("olga/probes_pgen.tsv", 
+  left_join(read_tsv("../assets/olga/probes_pgen.tsv", 
                      col_names = c("junction_aa", "pcdr"))) |>
   left_join(data.vdjdb |>
               select(v_call, j_call, junction_aa) |>
@@ -215,7 +215,7 @@ for (iter in 1:200){
 }
 ```
 
-Plot dynamics
+Plot dynamics of specific clonotypes and cells
 
 ```{r}
 data.yf.match |>
@@ -269,6 +269,8 @@ data.yf.match |>
 data.yf.match.stat
 ```
 
+Plot effect size and significance
+
 ```{r}
 data.yf.match.stat |>
   ggplot(aes(x = as.factor(day), 
@@ -309,5 +311,5 @@ data.yf.match.stat |>
 ```
 
 ```{r}
-# TODO: P-value and effect size
+# TODO: COVID example (single-cell?)
 ```

@@ -1,0 +1,83 @@
+---
+title: "VDJbet motif frequency - inverse antigen frequency (MF-IAF) snippet"
+author: "M.S."
+date: "2025-03-14"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(stringr)
+library(ggplot2)
+set.seed(42)
+```
+
+Load the [11 IMGT 'Physicochemical' classes of the 20 common amino acids](https://imgt.org/IMGTeducation/Aide-memoire/_UK/aminoacids/IMGTclasses.html#refs)
+
+```{r}
+aa_table <- read_tsv("../assets/aa_classes.tsv")
+aa_dict <- aa_table$aa_imgt
+names(aa_dict) <- aa_table$aa
+aa_dict[c("D", "E", "K", "R", "F", "W")]
+aa_translate <- function(seqs) {
+  seqs |>
+    sapply(\(seq) 
+           aa_dict[str_split_1(seq, pattern = "")] |> 
+             str_flatten()
+    )
+}
+aa_translate(c("DEDE", "DRDWF"))
+```
+
+Kmerize function
+
+```{r}
+get_kmer <- function(seq, pos, k, xpos = -1) {
+  kmer <- substr(seq, pos, pos + k - 1)
+  if (xpos > 0) {
+    substr(kmer, xpos, xpos) <- "X"
+  }
+  kmer
+}
+
+get_kmers_1 <- function(seq, k = 4, mask = 1:k, imgt_aa = T) {
+  if (is.na(seq)) {
+    return(tibble())
+  }
+  len <- nchar(seq)
+  if (len < k) {
+    return(tibble())
+  }
+  tbl <- expand_grid(mask = mask, 
+                     pos = 1:(len - k + 1)) 
+  tbl$k <- k
+  if (imgt_aa) {
+    seqt <- aa_translate(seq)
+  }
+  tbl$seq <- seq
+  tbl |>
+    rowwise() |>
+    mutate(kmer = get_kmer(seqt, pos, k, mask)) |>
+    ungroup()
+}
+
+get_kmers_1("CASSLAPGATNEKLFF")
+
+get_kmers <- function(seqs, k = 4, mask = 1:k, imgt_aa = T) {
+  as.list(seqs) |>
+    lapply(\(seq) get_kmers_1(seq, k, mask, imgt_aa)) |>
+    bind_rows() |>
+    ungroup()
+}
+
+get_kmers(c("CAS", 
+            "CASSLA", 
+            "PGATNEKLFF"))
+```
+
+```{r}
+# END
+```
