@@ -2,7 +2,9 @@
 title: "VDJbet snippet"
 author: "M.S."
 date: "2025-03-14"
-output: html_document
+output:
+  html_document: default
+  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -95,12 +97,29 @@ data.vdjdb <- read_tsv("vdjdb-2025-02-21/vdjdb_full.txt") |>
   unique()
 ```
 
-Write seqs we want to compute rearrangement probability for
+Write seqs we want to compute rearrangement probability for. We will use
+a separate PBMC 5'RACE dataset for it in order to remove intrinsic biases of
+OLGA generation model (presence/absence of spurios sequences prior to selection).
 
 ```{r}
+v_allowed <- unique(data.olga$v_call)
+j_allowed <- unique(data.olga$j_call)
+
+#data.probes <- bind_rows(data.vdjdb,
+#                         data.yf |> # (!) correct for markers originating from data
+#                           ungroup() |>
+#                           sample_n(100000)) |>
+#  filter(v_call %in% v_allowed, j_call %in% j_allowed)
+
+data.britanova <- read_tsv("britanova/human.trb.strict.txt.gz") |>
+  select(junction_aa = cdr3aa,
+         v_call = v, j_call = j)
+
 data.probes <- bind_rows(data.vdjdb,
-                         data.olga |>
-                           head(100000))
+                         data.britanova |>
+                           head(100000)) |>
+  filter(v_call %in% v_allowed, j_call %in% j_allowed)
+
 data.probes |>
   select(junction_aa, v_call, j_call) |>
   unique() |>
@@ -114,22 +133,24 @@ rm olga/probes_pgen.tsv
 olga-compute_pgen -i olga/probes.tsv --humanTRB -o olga/probes_pgen.tsv --display_off --time_updates_off --seq_in 0 --v_in 1 --j_in 2
 ```
 
+Load $P$ from OLGA output
+
 ```{r}
 data.probes |>
-  select(-junction) |>
+  select(-junction, -duplicate_count) |>
   unique() |>
   left_join(read_tsv("olga/probes_pgen.tsv", 
                      col_names = c("junction_aa", "pcdr"))) |>
-  left_join(data.vj |>
-              select(v_call, j_call, vj_factor)) |>
   left_join(data.vdjdb |>
               select(v_call, j_call, junction_aa) |>
               mutate(vdjdb = T))|>
   mutate(vdjdb = ifelse(is.na(vdjdb), F, T)) |>
+  left_join(data.vj |>
+              select(v_call, j_call, vj_factor)) |>
   group_by(v_call, j_call, junction_aa) |>
   mutate(pcdr = max(pcdr)) |> # somewhy different Pgens can be returned?
   unique() |>
-  mutate(pgen = pcdr * vj_factor + 2^-80,
+  mutate(pgen = pcdr * vj_factor + 2^-60,
          pgen_bin = round(log2(pgen), 0)) -> data.probes.pgen
 
 data.probes.pgen |>
@@ -142,16 +163,16 @@ Compare distribution of $P$ between VDJdb and random sample
 ```{r}
 data.probes.pgen |>
   ggplot(aes(x = pgen_bin)) +
-  geom_density(aes(color = vdjdb, y = ..density..)) +
   geom_histogram(binwidth = 1, 
                  aes(fill = vdjdb, y = ..density..),
                  position = "dodge") +
-  scale_fill_brewer(palette = "Set1") +
-  scale_color_brewer(palette = "Set1") +
+  geom_density(aes(color = vdjdb, y = ..density..)) +
+  scale_fill_brewer(palette = "Paired") +
+  scale_color_brewer(palette = "Paired") +
   theme_bw()
 ```
 
-Do 100 bootstraps and see how much we match
+Do 200 bootstraps and see how much we match
 
 ```{r}
 data.probes.pgen |>
@@ -159,6 +180,10 @@ data.probes.pgen |>
   group_by(pgen_bin) |>
   summarise(count_vdjdb = n()) ->
   vdjdb_pgen_counts
+
+data.probes.pgen |>
+  filter(vdjdb) |>
+  group_by()
 
 sum(vdjdb_pgen_counts$count_vdjdb)
 
@@ -173,7 +198,7 @@ data.yf.match <- data.yf |>
   summarise(matched = n(), 
             matched_duplicate_count = sum(duplicate_count)) |>
   mutate(bootstrap = 0)
-for (iter in 1:100){
+for (iter in 1:200){
   print(paste0("Bootstrap iter#", iter))
   data.probes.pgen.pool |>
     group_by(pgen_bin) |>
@@ -190,7 +215,7 @@ for (iter in 1:100){
 }
 ```
 
-Plot
+Plot dynamics
 
 ```{r}
 data.yf.match |>
@@ -198,26 +223,89 @@ data.yf.match |>
   ggplot(aes(x = day, y = matched)) +
   geom_boxplot(data = data.yf.match |>
                  filter(bootstrap > 0),
-               aes(x = day, group = day,
-                   y = matched_duplicate_count)) +
+               aes(x = day, 
+                   group = day,
+                   y = matched), 
+               width = 3, 
+               outlier.size = 1) +
   geom_line(color = "red") +
   geom_point(color = "red") +
-  scale_y_log10() +
   facet_grid(replica~donor) +
   theme_bw()
 
 data.yf.match |>
   filter(bootstrap == 0) |>
-  ggplot(aes(x = day, y = matched_duplicate_count)) +
+  ggplot(aes(x = day, y = log2(matched_duplicate_count + 1))) +
   geom_boxplot(data = data.yf.match |>
                  filter(bootstrap > 0),
                aes(x = day, group = day,
-                   y = matched_duplicate_count)) +
+                   y = log2(matched_duplicate_count + 1)), 
+               width = 3, 
+               outlier.size = 1) +
   geom_line(color = "red") +
   geom_point(color = "red") +
-  scale_y_log10() +
   facet_grid(replica~donor) +
   theme_bw()
+```
+
+Compute bootstrapped mean and sd and to stat tests
+
+```{r}
+data.yf.match |>
+  group_by(donor, day, replica) |>
+  summarise(matched_mean = mean(matched[bootstrap > 0]),
+            matched_sd = sd(matched[bootstrap > 0]),
+            matched_p = 1 - sum(matched[bootstrap == 0] > matched) / n(),
+            matched = matched[bootstrap == 0],
+            matched_duplicate_count_mean = mean(log2(matched_duplicate_count[bootstrap > 0] + 1)),
+            matched_duplicate_count_sd = sd(log2(matched_duplicate_count[bootstrap > 0] + 1)),
+            matched_duplicate_count_p = 1 - sum(matched_duplicate_count[bootstrap == 0] > matched_duplicate_count) / n(),
+            matched_duplicate_count = log2(matched_duplicate_count[bootstrap == 0] + 1),
+            matched_cohen_d = (matched - matched_mean) / matched_sd,
+            matched_duplicate_count_cohen_d = (matched_duplicate_count - matched_duplicate_count_mean) / matched_duplicate_count_sd) |>
+  mutate(matched_p_adj = p.adjust(matched_p, method = "fdr"),
+         matched_duplicate_count_p_adj = p.adjust(matched_duplicate_count_p, method = "fdr")) -> data.yf.match.stat
+
+data.yf.match.stat
+```
+
+```{r}
+data.yf.match.stat |>
+  ggplot(aes(x = as.factor(day), 
+             y = paste(donor, replica),
+             fill = matched_cohen_d,
+             color = matched_p_adj < 0.1 & 
+               matched_cohen_d > 0)) +
+  geom_tile(size = 1) +
+  scale_color_manual(guide = "none",
+                     values = c("white", "black")) +
+  scale_fill_distiller("Clonotypes matched\nCohen's d", 
+                       palette = "RdBu", 
+                       direction = -1,
+                       limits = c(-6, 6)) +
+  xlab("day") + 
+  ylab("sample") +
+  theme_classic() +
+  theme(aspect.ratio = 1,
+        legend.position = "bottom")
+
+data.yf.match.stat |>
+  ggplot(aes(x = as.factor(day), 
+             y = paste(donor, replica),
+             fill = matched_duplicate_count_cohen_d,
+             color = matched_duplicate_count_p_adj < 0.1 & 
+               matched_duplicate_count_cohen_d > 0)) +
+  geom_tile(size = 1) +
+  scale_color_manual(guide = "none",
+                     values = c("white", "black")) +
+  scale_fill_distiller("Cells matched\nCohen's d", 
+                       palette = "Reds", 
+                       direction = 1) +
+  xlab("day") + 
+  ylab("sample") +
+  theme_classic() +
+  theme(aspect.ratio = 1,
+        legend.position = "bottom")
 ```
 
 ```{r}
