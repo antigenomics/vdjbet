@@ -1,5 +1,5 @@
 ---
-title: "VDJbet motif frequency - inverse antigen frequency (MF-IAF) snippet"
+title: "VDJbet motif frequency - inverse k-mer frequency (MF-IKF) snippet"
 author: "M.S."
 date: "2025-03-14"
 output:
@@ -12,7 +12,9 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(stringr)
 library(ggplot2)
+library(ggrepel)
 set.seed(42)
+K <- 4
 ```
 
 Load the [11 IMGT 'Physicochemical' classes of the 20 common amino acids](https://imgt.org/IMGTeducation/Aide-memoire/_UK/aminoacids/IMGTclasses.html#refs)
@@ -35,7 +37,7 @@ aa_translate(c("DEDE", "DRDWF"))
 Kmerize function
 
 ```{r}
-get_kmer <- function(seq, pos, k, xpos = -1) {
+get_kmer <- function(seq, pos, k = K, xpos = -1) {
   kmer <- substr(seq, pos, pos + k - 1)
   if (xpos > 0) {
     substr(kmer, xpos, xpos) <- "X"
@@ -43,7 +45,7 @@ get_kmer <- function(seq, pos, k, xpos = -1) {
   kmer
 }
 
-get_kmers_1 <- function(seq, k = 4, mask = 1:k, imgt_aa = T) {
+get_kmers_1 <- function(seq, k = K, mask = 1:k, imgt_aa = T) {
   if (is.na(seq)) {
     return(tibble())
   }
@@ -66,7 +68,7 @@ get_kmers_1 <- function(seq, k = 4, mask = 1:k, imgt_aa = T) {
 
 get_kmers_1("CASSLAPGATNEKLFF")
 
-get_kmers <- function(seqs, k = 4, mask = 1:k, imgt_aa = T) {
+get_kmers <- function(seqs, k = K, mask = 1:k, imgt_aa = T) {
   as.list(seqs) |>
     lapply(\(seq) get_kmers_1(seq, k, mask, imgt_aa)) |>
     bind_rows() |>
@@ -78,6 +80,184 @@ get_kmers(c("CAS",
             "PGATNEKLFF"))
 ```
 
+Compute information content and frequency of K-mers across antigens, taking
+into account V and junction_aa_len:
+* IKF: smaller - more ubiquous K-mers like CASS/KLFF coming from V/J, 
+larger - rare K-mers that are more likely to distinguish between antigens
+* MF: motif frequency in a given antigen, either K-mer, or K-mer+V, 
+or K-mer+V+len frequency
+* confidence: for a given epitope k-mer should be seen at least 5 times, 
+at least 3 times with a given V, at least 2 times with a given V for a given len
+
 ```{r}
-# END
+get_kmer_freqs <- function(seqs, k = K, mask = 1:k, imgt_aa = T) {
+  get_kmers(seqs, k, mask, imgt_aa) |>
+    group_by(k, mask, kmer) |>
+    summarise(x_lva = length(unique(seq)), 
+              .groups = "drop")
+}
+
+data.vdjdb <- read_tsv("../assets/vdjdb-2025-02-21/vdjdb_full.txt") |>
+  group_by(antigen.epitope) |>
+  mutate(variants = length(unique(cdr3.beta)),
+         junction_aa_len = nchar(cdr3.beta)) |>
+  ungroup() |>
+  filter(species == "HomoSapiens",
+         antigen.epitope != "KLGGALQAK", # certified bad by 10X
+         !is.na(cdr3.beta),
+         variants >= 30,
+         junction_aa_len >= 10) |>
+  mutate(v.beta = str_split_fixed(v.beta, fixed("*"), 2)[,1]) |>
+  select(junction_aa = cdr3.beta, 
+         v_call = v.beta,
+         junction_aa_len,
+         antigen = antigen.epitope, 
+         antigen_host = antigen.species) |>
+  unique()
+
+data.vdjdb.kmer <- data.vdjdb |>
+  group_by(antigen, antigen_host, v_call, junction_aa_len) |>
+  group_modify(~get_kmer_freqs(.$junction_aa)) |>
+  group_by(kmer, antigen, antigen_host, v_call) |>
+  mutate(x_va = sum(x_lva)) |>
+  group_by(kmer, antigen, antigen_host) |>
+  mutate(x_a = sum(x_lva)) |>
+  group_by(kmer) |>
+  mutate(x = sum(x_lva)) |>
+  left_join(data.vdjdb |>
+              group_by(antigen, antigen_host, v_call, junction_aa_len) |>
+              summarise(X_lva = length(unique(junction_aa))) |>
+              group_by(antigen, antigen_host, v_call) |>
+              mutate(X_va = sum(X_lva)) |>
+              group_by(antigen, antigen_host) |>
+              mutate(X_a = sum(X_lva)) |>
+              ungroup() |>
+              mutate(X = sum(X_lva))) |>
+  group_by(kmer) |>
+  mutate(MF_lva = x_lva / x,
+         MF_va = x_va / x,
+         MF_a = x_a / x, # frequency in antigen
+         IKF_lva = mean(log(X_lva / x_lva)),
+         IKF_va = mean(log(X_va / x_va)),
+         IKF_a = mean(log(X_a / x_a)),
+         IKF = log(X / x)) |> # information across antigens
+  mutate(confidence = x_lva >= 2 & x_va >= 3 & x_a >= 5)
+
+data.vdjdb.kmer
+```
+
+Check K-mer behavior for well-known antigens
+
+```{r fig.width=10, fig.height=6}
+data.vdjdb.kmer3 <- data.vdjdb.kmer |>
+  filter(confidence,
+         substr(antigen, 1, 3) %in% c("NLV", "GIL", "GLC")) |>
+  select(antigen, IKF, IKF_a, MF_va, MF_a, v_call, kmer) |>
+  unique()
+
+data.vdjdb.kmer3 |>
+  ggplot(aes(x = IKF - IKF_a, y = MF_va, color = log(MF_va / MF_a))) +
+  geom_point() +
+  geom_text_repel(data = data.vdjdb.kmer3 |>
+                    group_by(antigen) |>
+                    filter(rank(-MF_va, ties.method = "first") <= 5),
+                  aes(label = paste(v_call, kmer)),
+                  color = "magenta") +
+  scale_y_log10() +
+  facet_wrap(~antigen, scales = "free") +
+  scale_color_distiller(palette = "RdBu", direction = -1) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+Match well known specific sequences versus VDJdb. First we do it K-mer-wise
+
+```{r}
+match_kmer_db <- function(seqs, 
+                          v_call, 
+                          db,
+                          conf_filter = T,
+                          k = K, 
+                          mask = 1:k,
+                          imgt_aa = T) {
+  get_kmers(seqs, k, mask, imgt_aa) |>
+    left_join(tibble(seq = seqs, 
+                     v_call = v_call)) |>
+    left_join(db |>
+                filter(!conf_filter | confidence))
+}
+
+match_vdjdb_kmer <- function(seqs, 
+                             v_call,
+                             conf_filter = T,
+                             k = K, 
+                             mask = 1:k,
+                             imgt_aa = T) {
+  match_kmer_db(seqs, v_call, data.vdjdb.kmer, conf_filter, k, mask, imgt_aa) |>
+    group_by(seq, v_call, kmer, antigen, antigen_host) |>
+    mutate(mfikf = sum(MF_va * IKF)) |>
+    arrange(-mfikf)
+}
+
+test_qq <- tibble(seq = c("CASSLAPGATNEKLFF",
+                          "CASSIRSSYEQYF",
+                          "CSARDRTGNGYTF"), 
+                  v_call = c("TRBV7-6",
+                             "TRBV19",
+                             "TRBV20-1"),
+                  query_antigen = c("NLVPMVATV",
+                                    "GILGFVFTL",
+                                    "GLCTLVAML"))
+
+# No length filter
+with(test_qq,
+     match_vdjdb_kmer(seq, v_call)) |>
+  left_join(test_qq) |>
+  group_by(seq) |>
+  slice_max(order_by = mfikf, n = 5) |>
+  mutate(match = query_antigen == antigen) |>
+  select(kmer, mfikf, seq, pos, v_call, antigen, match) |>
+  knitr::kable()
+
+# Length filter
+with(test_qq,
+     match_vdjdb_kmer(seq, v_call)) |>
+  mutate(seq_len = nchar(seq)) |>
+  left_join(test_qq) |>
+  filter(abs(seq_len - junction_aa_len) <= 3) |>
+  group_by(seq) |>
+  slice_max(order_by = mfikf, n = 5) |>
+  mutate(match = query_antigen == antigen) |>
+  select(kmer, mfikf, seq, pos, v_call, antigen, match) |>
+  knitr::kable()
+```
+
+```{r}
+# No length filter
+with(test_qq,
+     match_vdjdb_kmer(seq, v_call)) |>
+  left_join(test_qq) |>
+  group_by(seq, v_call, antigen, query_antigen) |>
+  summarise(mfikf = sum(mfikf)) |>
+  mutate(match = query_antigen == antigen) |>
+  group_by(seq) |>
+  slice_max(order_by = mfikf, n = 5) |>
+  knitr::kable()
+
+# Length filter
+with(test_qq,
+     match_vdjdb_kmer(seq, v_call)) |>
+  left_join(test_qq) |>
+  mutate(seq_len = nchar(seq)) |>
+  filter(abs(seq_len - junction_aa_len) <= 3) |>
+  group_by(seq, v_call, antigen, query_antigen) |>
+  summarise(mfikf = sum(mfikf)) |>
+  mutate(match = query_antigen == antigen) |>
+  group_by(seq) |>
+  slice_max(order_by = mfikf, n = 5) |>
+  knitr::kable()
+```
+
+```{r}
+# END todo: think how to fix GLC, need V usage adjustment
 ```
