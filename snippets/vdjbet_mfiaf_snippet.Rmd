@@ -82,10 +82,13 @@ get_kmers(c("CAS",
 
 Compute information content and frequency of K-mers across antigens, taking
 into account V and junction_aa_len:
+
 * IKF: smaller - more ubiquous K-mers like CASS/KLFF coming from V/J, 
 larger - rare K-mers that are more likely to distinguish between antigens
+
 * MF: motif frequency in a given antigen, either K-mer, or K-mer+V, 
 or K-mer+V+len frequency
+
 * confidence: for a given epitope k-mer should be seen at least 5 times, 
 at least 3 times with a given V, at least 2 times with a given V for a given len
 
@@ -141,7 +144,10 @@ data.vdjdb.kmer <- data.vdjdb |>
          IKF_va = mean(log(X_va / x_va)),
          IKF_a = mean(log(X_a / x_a)),
          IKF = log(X / x)) |> # information across antigens
-  mutate(confidence = x_lva >= 2 & x_va >= 3 & x_a >= 5)
+  mutate(confidence = x_lva >= 2 & x_va >= 3 & x_a >= 5) |>
+  group_by(antigen) |>
+  mutate(M = length(unique(kmer))) |>
+  ungroup()
 
 data.vdjdb.kmer
 ```
@@ -164,7 +170,7 @@ data.vdjdb.kmer3 |>
                   aes(label = paste(v_call, kmer)),
                   color = "magenta") +
   scale_y_log10() +
-  facet_wrap(~antigen, scales = "free") +
+  facet_wrap(~antigen) +
   scale_color_distiller(palette = "RdBu", direction = -1) +
   theme_bw() +
   theme(legend.position = "bottom")
@@ -173,29 +179,22 @@ data.vdjdb.kmer3 |>
 Match well known specific sequences versus VDJdb. First we do it K-mer-wise
 
 ```{r}
-match_kmer_db <- function(seqs, 
-                          v_call, 
-                          db,
-                          conf_filter = T,
-                          k = K, 
-                          mask = 1:k,
-                          imgt_aa = T) {
+match_kmer_db <- function(seqs, v_call, db,
+                          conf_filter = T, k = K, mask = 1:k, imgt_aa = T) {
   get_kmers(seqs, k, mask, imgt_aa) |>
-    left_join(tibble(seq = seqs, 
-                     v_call = v_call)) |>
-    left_join(db |>
-                filter(!conf_filter | confidence))
+    select(seq, kmer) |>
+    unique() |>
+    left_join(tibble(seq = seqs, v_call = v_call)) |>
+    left_join(db |> filter(!conf_filter | confidence))
 }
 
 match_vdjdb_kmer <- function(seqs, 
                              v_call,
-                             conf_filter = T,
-                             k = K, 
-                             mask = 1:k,
-                             imgt_aa = T) {
-  match_kmer_db(seqs, v_call, data.vdjdb.kmer, conf_filter, k, mask, imgt_aa) |>
-    group_by(seq, v_call, kmer, antigen, antigen_host) |>
-    mutate(mfikf = sum(MF_va * IKF)) |>
+                             conf_filter = T, k = K, mask = 1:k, imgt_aa = T) {
+  match_kmer_db(seqs, v_call, data.vdjdb.kmer, 
+                conf_filter, k, mask, imgt_aa) |>
+    group_by(kmer, seq, v_call, antigen) |>
+    summarise(mfikf = max(MF_va * IKF)) |>
     arrange(-mfikf)
 }
 
@@ -209,28 +208,16 @@ test_qq <- tibble(seq = c("CASSLAPGATNEKLFF",
                                     "GILGFVFTL",
                                     "GLCTLVAML"))
 
-# No length filter
 with(test_qq,
      match_vdjdb_kmer(seq, v_call)) |>
   left_join(test_qq) |>
   group_by(seq) |>
   slice_max(order_by = mfikf, n = 5) |>
   mutate(match = query_antigen == antigen) |>
-  select(kmer, mfikf, seq, pos, v_call, antigen, match) |>
-  knitr::kable()
-
-# Length filter
-with(test_qq,
-     match_vdjdb_kmer(seq, v_call)) |>
-  mutate(seq_len = nchar(seq)) |>
-  left_join(test_qq) |>
-  filter(abs(seq_len - junction_aa_len) <= 3) |>
-  group_by(seq) |>
-  slice_max(order_by = mfikf, n = 5) |>
-  mutate(match = query_antigen == antigen) |>
-  select(kmer, mfikf, seq, pos, v_call, antigen, match) |>
   knitr::kable()
 ```
+
+Summarize for all K-mers
 
 ```{r}
 # No length filter
@@ -238,23 +225,10 @@ with(test_qq,
      match_vdjdb_kmer(seq, v_call)) |>
   left_join(test_qq) |>
   group_by(seq, v_call, antigen, query_antigen) |>
-  summarise(mfikf = sum(mfikf)) |>
+  summarise(score = sum(mfikf) / nchar(seq[1])) |>
   mutate(match = query_antigen == antigen) |>
   group_by(seq) |>
-  slice_max(order_by = mfikf, n = 5) |>
-  knitr::kable()
-
-# Length filter
-with(test_qq,
-     match_vdjdb_kmer(seq, v_call)) |>
-  left_join(test_qq) |>
-  mutate(seq_len = nchar(seq)) |>
-  filter(abs(seq_len - junction_aa_len) <= 3) |>
-  group_by(seq, v_call, antigen, query_antigen) |>
-  summarise(mfikf = sum(mfikf)) |>
-  mutate(match = query_antigen == antigen) |>
-  group_by(seq) |>
-  slice_max(order_by = mfikf, n = 5) |>
+  slice_max(order_by = score, n = 5) |>
   knitr::kable()
 ```
 
